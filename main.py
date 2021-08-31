@@ -8,7 +8,11 @@ from screeninfo import get_monitors
 import PySimpleGUI as sg
 
 # define constants such as the BraiinsOS package to be installed, the update tar file, and the referral ipk
-REFFERRAL_FILE_S9 = os.path.join("files", "bos-referral_2021-04-28_arm_cortex-a9_neon.ipk")
+REFFERRAL_FILE_S9 = os.path.join("files", "referral.ipk")
+LIB_FILE_S9 = os.path.join(os.getcwd(), "files", "system", "ld-musl-armhf.so.1")
+SFTP_SERVER_S9 = os.path.join(os.getcwd(), "files", "system", "sftp-server")
+FW_PRINTENV_S9 = os.path.join(os.getcwd(), "files", "system", "fw_printenv")
+FIRMWARE_PATH_S9 = os.path.join(os.getcwd(), "files", "firmware")
 
 
 class Miner:
@@ -171,6 +175,27 @@ class Miner:
             # let the user know the result of the command
             self.add_to_output(result.stdout)
 
+    async def send_dir(self, l_dir: str, r_dest: str, username: str, password=None) -> None:
+        """
+        Send a directory to a miner
+        """
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
+
+        # tell the user we are sending a file to the miner
+        self.add_to_output(f"Sending directory to {self.ip}...")
+        # create ssh connection to miner
+        async with asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
+                                    server_host_key_algs=['ssh-rsa']) as conn:
+            # create sftp client using ssh connection
+            async with conn.start_sftp_client() as sftp:
+                # send a file over sftp
+                await sftp.put(l_dir, remotepath=r_dest, recurse=True)
+        # tell the user the file was sent to the miner
+        self.add_to_output(f"Directory sent...")
+
     async def send_file(self, l_file: str, r_dest: str, username: str, password=None) -> None:
         """
         Send a file to a miner
@@ -273,9 +298,35 @@ class Miner:
         """
         Run the braiinsOS installation process on the miner
         """
-        # do some install stuff here separated by asyncio.wait(0) to allow the gui to remain responsive.
-        pass
+        # remove temp firmware directory, making sure its empty
+        await self.run_command("rm -fr /tmp/firmware", "root", password="admin")
+        # recreate temp firmware directory
+        await self.run_command("mkdir -p /tmp/firmware", "root", password="admin")
+        # ensure lib exists
+        await self.run_command("mkdir -p /lib", "root", password="admin")
+        # copy ld-musl-armhf.so.1 to lib
+        await self.send_file(LIB_FILE_S9, "/lib/ld-musl-armhf.so.1", "root", password="admin")
+        # add execute permissions to /lib/ld-musl-armhf.so.1
+        await self.run_command("chmod +x /lib/ld-musl-armhf.so.1", "root", password="admin")
 
+        # create openssh directory in /usr/lib/openssh
+        await self.run_command("mkdir -p /usr/lib/openssh", "root", password="admin")
+        # copy sftp-server to /usr/lib/openssh/sftp-server
+        await self.send_file(SFTP_SERVER_S9, "/usr/lib/openssh/sftp-server", "root", password="admin")
+        # add execute permissions to /usr/lib/openssh/sftp-server
+        await self.run_command("chmod +x /usr/lib/openssh/sftp-server", "root", password="admin")
+
+        # ensure /usr/sbin exists
+        await self.run_command("mkdir -p /usr/sbin", "root", password="admin")
+        # copy fw_printenv to /usr/sbin/fw_printenv
+        await self.send_file(FW_PRINTENV_S9, "/usr/sbin/fw_printenv", "root", password="admin")
+        # add execute permissions to /usr/sbin/fw_printenv
+        await self.run_command("chmod +x /usr/sbin/fw_printenv", "root", password="admin")
+
+        # copy over firmware files to /tmp/firmware
+        await self.send_dir(FIRMWARE_PATH_S9, "/tmp/firmware", "root", password="admin")
+        # add execute permissions to firmware stage 1
+        await self.run_command("chmod +x /tmp/firmware/stage1.sh", "root", password="admin")
 
 
 async def run(miner: Miner) -> None:
