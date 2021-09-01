@@ -173,7 +173,10 @@ class Miner:
             # send the command and store the result
             result = await conn.run(cmd)
             # let the user know the result of the command
-            self.add_to_output(result.stdout)
+            if result.stdout != "":
+                self.add_to_output(result.stdout)
+            else:
+                self.add_to_output(cmd)
 
     async def send_dir(self, l_dir: str, r_dest: str, username: str, password=None) -> None:
         """
@@ -210,10 +213,12 @@ class Miner:
         # create ssh connection to miner
         async with asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
                                     server_host_key_algs=['ssh-rsa']) as conn:
+            await asyncssh.scp(l_file, (conn, r_dest))
+
             # create sftp client using ssh connection
-            async with conn.start_sftp_client() as sftp:
-                # send a file over sftp
-                await sftp.put(l_file, remotepath=r_dest)
+        #            async with conn.start_sftp_client() as sftp:
+        # send a file over sftp
+        #                await sftp.put(l_file, remotepath=r_dest)
         # tell the user the file was sent to the miner
         self.add_to_output(f"File sent...")
 
@@ -323,8 +328,10 @@ class Miner:
         # add execute permissions to /usr/sbin/fw_printenv
         await self.run_command("chmod +x /usr/sbin/fw_printenv", "root", password="admin")
 
+        await self.run_command("ln -fs /usr/sbin/fw_printenv /usr/sbin/fw_setenv", "root", password="admin")
+
         # copy over firmware files to /tmp/firmware
-        await self.send_dir(FIRMWARE_PATH_S9, "/tmp/firmware", "root", password="admin")
+        await self.send_dir(FIRMWARE_PATH_S9, "/tmp", "root", password="admin")
         # add execute permissions to firmware stage 1
         await self.run_command("chmod +x /tmp/firmware/stage1.sh", "root", password="admin")
 
