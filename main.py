@@ -14,6 +14,9 @@ LIB_FILE_S9 = os.path.join(os.getcwd(), "files", "system", "ld-musl-armhf.so.1")
 SFTP_SERVER_S9 = os.path.join(os.getcwd(), "files", "system", "sftp-server")
 FW_PRINTENV_S9 = os.path.join(os.getcwd(), "files", "system", "fw_printenv")
 FIRMWARE_PATH_S9 = os.path.join(os.getcwd(), "files", "firmware")
+UPDATE_FILE_S9 = os.path.join(os.getcwd(), "files", "update.tar")
+CONFIG_FILE = os.path.join(os.getcwd(), "files", "config.toml")
+
 
 class Miner:
     def __init__(self, ip: str, num: int) -> None:
@@ -32,19 +35,24 @@ class Miner:
         """
         Pause the event loop for this miner after completion of current command
         """
-        # tell the user we are pausing
-        self.add_to_output("Pausing...")
-        # clearing sets the event to block on wait
-        self.running.clear()
+        # check if we are running
+        if self.running.is_set():
+            # tell the user we are pausing
+            self.add_to_output("Pausing...")
+            # clearing sets the event to block on wait
+            self.running.clear()
 
-    async def unpause(self) -> None:
+    async def resume(self) -> None:
         """
         Unpause the event loop for this miner
         """
-        # tell the user we are unpausing
-        self.add_to_output("Unpausing...")
-        # set running again
-        self.running.set()
+        # check if we are paused
+        if not self.running.is_set():
+            # tell the user we are resuming
+            self.add_to_output("Resuming...")
+            # set running again
+            self.running.set()
+            self.add_to_output("Resumed...")
 
     def add_to_output(self, message: str) -> None:
         """
@@ -56,8 +64,8 @@ class Miner:
     async def get_connection(self, username, password):
         if self.conn is None:
             # if connection doesnt exist, create it
-            conn = asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
-                                    server_host_key_algs=['ssh-rsa'])
+            conn = await asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
+                                          server_host_key_algs=['ssh-rsa'])
             # return created connection
             self.conn = conn
         else:
@@ -81,8 +89,6 @@ class Miner:
             reader, writer = await asyncio.wait_for(connection_fut, timeout=1)
             # immediately close connection, we know connection happened
             writer.close()
-            # let the user know we connected
-            self.add_to_output(f"Connected to port {port}...")
             # make sure the writer is closed
             await writer.wait_closed()
             # ping was successful
@@ -113,6 +119,15 @@ class Miner:
             # ping returned false, HTTP is down
             return False
 
+    async def wait_for_disconnect(self):
+        self.add_to_output('Waiting for disconnect...')
+        while await self.ping_http():
+            # pause logic
+            if not self.running.is_set():
+                self.add_to_output("Paused...")
+            await self.running.wait()
+            await asyncio.sleep(1)
+
     async def ping_ssh(self) -> bool:
         """
         Ping the SSH port of the miner
@@ -141,6 +156,7 @@ class Miner:
 
         # tell the user we are getting the version
         self.add_to_output("Getting version...")
+        retries = 0
         while True:
             # open a connection to the [cgminer, bmminer, bosminer] API port (4028)
             connection_fut = asyncio.open_connection(self.ip, 4028)
@@ -162,15 +178,24 @@ class Miner:
                 # load the returned data (JSON), and remove the null byte at the end
                 data_dict = json.loads(data[:-1].decode('utf-8'))
                 # tell the user the version of the miner
-                self.add_to_output(f'Version is {data_dict["VERSION"][0][list(data_dict["VERSION"][0].keys())[0]]}...')
-                return data_dict["VERSION"][0][list(data_dict["VERSION"][0].keys())[0]]
+                self.add_to_output(f'Version is {data_dict["VERSION"][0][list(data_dict["VERSION"][0].keys())[1]]}...')
+                if "BOSminer+" in data_dict["VERSION"][0].keys() or "BOSminer" in data_dict["VERSION"][0].keys():
+                    return "BOS+"
+                else:
+                    return "Antminer"
             except asyncio.exceptions.TimeoutError:
                 # we have no version, the connection timed out
                 self.add_to_output("Get version failed...")
                 return False
             except ConnectionRefusedError:
+                # add to retry times
+                retries += 1
                 # connection was refused, tell the user
                 self.add_to_output("Connection refused, retrying...")
+                # make sure it doesnt get stuck here
+                if retries > 3:
+                    self.add_to_output('Connection refused, attempting install...')
+                    return "Antminer"
 
     async def run_command(self, cmd: str) -> None:
         """
@@ -184,10 +209,15 @@ class Miner:
         # get/create ssh connection to miner
         conn = await self.get_connection("root", "admin")
         # send the command and store the result
-        result = await conn.run(cmd)
+        try:
+            result = await conn.run(cmd)
+        except:
+            result = await conn.run(cmd)
         # let the user know the result of the command
         if result.stdout != "":
             self.add_to_output(result.stdout)
+        elif result.stderr != "":
+            self.add_to_output("ERROR: " + result.stderr)
         else:
             self.add_to_output(cmd)
 
@@ -220,8 +250,6 @@ class Miner:
             self.add_to_output("Paused...")
         await self.running.wait()
 
-        # tell the user we are sending a file to the miner
-        self.add_to_output(f"Sending file to {self.ip}...")
         # cget/create ssh connection to miner
         conn = await self.get_connection("root", "admin")
         # send file over scp
@@ -264,7 +292,6 @@ class Miner:
             stderr=asyncio.subprocess.PIPE)
         # get stdout of the unlock
         stdout, _ = await proc.communicate()
-        print(stdout)
         # check if the webUI password needs to be reset
         if str(stdout).find("webUI") != -1:
             # tell the user to reset the webUI password
@@ -287,19 +314,41 @@ class Miner:
         await self.running.wait()
 
         # tell the user we are sending the referral
-        self.add_to_output(f"Sending referral IPK to {self.ip}...")
+        self.add_to_output(f"Sending referral IPK...")
         # create ssh connection to miner
         try:
             conn = await self.get_connection("root", "admin")
             # create sftp client using ssh connection
-            async with conn.start_sftp_client() as sftp:
-                # send the referral
-                await sftp.put(REFFERRAL_FILE_S9, remotepath='/tmp/referral.ipk')
-            # install the referral and collect the result
-            result = await conn.run(f'opkg install /tmp/referral.ipk')
+            await self.send_file(REFFERRAL_FILE_S9, '/tmp/referral.ipk')
+            await self.send_file(CONFIG_FILE, '/etc/bosminer.toml')
+
+            result = await conn.run(f'opkg install /tmp/referral.ipk && /etc/init.d/bosminer restart')
             self.add_to_output(result.stdout.strip())
             # tell the user the referral completed
             self.add_to_output(f"Referral configuration completed...")
+        except OSError:
+            self.add_to_output(f"Unknown error...")
+
+    async def update(self):
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
+
+        # tell the user we are updating
+        self.add_to_output(f"Updating...")
+        # create ssh connection to miner
+        try:
+            conn = await self.get_connection("root", "admin")
+            # tell the user we are sending the update file
+            self.add_to_output("Sending upgrade file...")
+            # send the update file
+            await self.send_file(UPDATE_FILE_S9, "/tmp/firmware")
+            # install the update and collect the result
+            result = await conn.run(f'sysupgrade /tmp/firmware.tar')
+            self.add_to_output(result.stdout.strip())
+            # tell the user the update completed
+            self.add_to_output(f"Update completed...")
         except OSError:
             self.add_to_output(f"Unknown error...")
 
@@ -307,10 +356,19 @@ class Miner:
         """
         Run the braiinsOS installation process on the miner
         """
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
         # remove temp firmware directory, making sure its empty
         await self.run_command("rm -fr /tmp/firmware")
         # recreate temp firmware directory
         await self.run_command("mkdir -p /tmp/firmware")
+
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
         # ensure lib exists
         await self.run_command("mkdir -p /lib")
         # copy ld-musl-armhf.so.1 to lib
@@ -318,6 +376,10 @@ class Miner:
         # add execute permissions to /lib/ld-musl-armhf.so.1
         await self.run_command("chmod +x /lib/ld-musl-armhf.so.1")
 
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
         # create openssh directory in /usr/lib/openssh
         await self.run_command("mkdir -p /usr/lib/openssh")
         # copy sftp-server to /usr/lib/openssh/sftp-server
@@ -325,6 +387,10 @@ class Miner:
         # add execute permissions to /usr/lib/openssh/sftp-server
         await self.run_command("chmod +x /usr/lib/openssh/sftp-server")
 
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
         # ensure /usr/sbin exists
         await self.run_command("mkdir -p /usr/sbin")
         # copy fw_printenv to /usr/sbin/fw_printenv
@@ -332,18 +398,30 @@ class Miner:
         # add execute permissions to /usr/sbin/fw_printenv
         await self.run_command("chmod +x /usr/sbin/fw_printenv")
 
-        await self.run_command("ln -fs /usr/sbin/fw_printenv /usr/sbin/fw_setenv")
-
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
         # copy over firmware files to /tmp/firmware
         await self.send_dir(FIRMWARE_PATH_S9, "/tmp")
         # add execute permissions to firmware stage 1
         await self.run_command("chmod +x /tmp/firmware/stage1.sh")
 
-        #generate random HWID to be used in install
-        HW_ID = base64.b64encode(os.urandom(12), b'ab').decode('ascii')
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
+        await self.run_command("ln -fs /usr/sbin/fw_printenv /usr/sbin/fw_setenv")
+
+        # pause logic
+        if not self.running.is_set():
+            self.add_to_output("Paused...")
+        await self.running.wait()
+        # generate random HWID to be used in install
+        hwid = base64.b64encode(os.urandom(12), b'ab').decode('ascii')
         # generate install command
-        install_cmd = f"/tmp/firmware stage1.sh \
-        '{HW_ID}' \
+        install_cmd = f"cd /tmp/firmware && ls -l && /bin/sh stage1.sh \
+        '{hwid}' \
         'UpstreamDataInc.test' \
         '900' \
         'yes' \
@@ -355,29 +433,66 @@ class Miner:
         # run the install
         await self.run_command(f"{install_cmd} && /sbin/reboot")
         # close ssh connection on our own, we know it will fail if not
-        self.conn.exit()
-        self.conn = None
+        if self.conn is not None:
+            self.conn.close()
+            await self.conn.wait_closed()
+            self.conn = None
         # wait 120 seconds for reboot
-        await asyncio.sleep(120)
+        self.add_to_output('Rebooting...')
+        await asyncio.sleep(20)
+        self.add_to_output("25% Complete...")
+        await asyncio.sleep(20)
+        self.add_to_output("50% Complete...")
+        await asyncio.sleep(20)
+        self.add_to_output("75% Complete...")
+        await asyncio.sleep(20)
+        self.add_to_output("Reboot Complete...")
+        while not await self.ping_http():
+            await asyncio.sleep(3)
+        await asyncio.sleep(5)
+
 
 async def run(miner: Miner) -> None:
+    main_state = "start"
     while True:
         await asyncio.sleep(3)
-        if await miner.ping_http():
-            if await miner.ping_ssh():
-                miner.add_to_output('SSH Connected...')
-                if await miner.get_version() == "BOSMiner":
-                    miner.add_to_output('Braiins is already installed')
-                    break
+        if main_state == "start":
+            if await miner.ping_http():
+                if await miner.ping_ssh():
+                    miner.add_to_output('SSH Connected...')
+                    if await miner.get_version() == "BOS+":
+                        miner.add_to_output('BraiinsOS+ is already installed!')
+                        main_state = "update"
+                        continue
+                    else:
+                        await asyncio.sleep(5)
+                        main_state = "install"
                 else:
-                    miner.add_to_output('Starting install...')
-                    await miner.install()
+                    miner.add_to_output('SSH Disconnected...')
+                    miner.add_to_output('Unlocking...')
+                    if await miner.ssh_unlock():
+                        main_state = "install"
+                        continue
+                    else:
+                        await miner.wait_for_disconnect()
+                        main_state = "start"
+                        continue
             else:
-                miner.add_to_output('SSH Disconnected...')
-                miner.add_to_output('Unlocking...')
-        else:
-            window[f"data_{miner.num}"].update(f"[{miner.ip}] - Down...\n", append=True)
-        # await miner.pause()
+                window[f"data_{miner.num}"].update(f"[{miner.ip}] - Down...\n", append=True)
+        if main_state == "install":
+            miner.add_to_output('Starting install...')
+            await miner.install()
+            main_state = "referral"
+        if main_state == "update":
+            await miner.update()
+            main_state = "referral"
+        if main_state == "referral":
+            await miner.send_referral()
+            main_state = "done"
+        if main_state == "done":
+            await miner.wait_for_disconnect()
+            main_state = "start"
+            continue
 
 
 # get screen size in a tuple
@@ -390,15 +505,23 @@ win_height = int(monitor.height)
 # create the layout
 layout = [[sg.Pane([
     sg.Column([[
-        sg.Button("Pause", key="pause_1"),
-        sg.Multiline(key="data_1", autoscroll=True, disabled=True, size=(int(win_width / 18), int(win_height / 36))),
-        sg.Button("Pause", key="pause_2"),
-        sg.Multiline(key="data_2", autoscroll=True, disabled=True, size=(int(win_width / 18), int(win_height / 36)))]]),
+        sg.Column([
+            [sg.Button("Pause", key="pause_1")],
+            [sg.Button("Resume", key="resume_1")]]),
+        sg.Multiline(key="data_1", autoscroll=True, disabled=True, size=(int(win_width / 20), int(win_height / 36))),
+        sg.Column([
+            [sg.Button("Pause", key="pause_2")],
+            [sg.Button("Resume", key="resume_2")]]),
+        sg.Multiline(key="data_2", autoscroll=True, disabled=True, size=(int(win_width / 20), int(win_height / 36)))]]),
     sg.Column([[
-        sg.Button("Pause", key="pause_3"),
-        sg.Multiline(key="data_3", autoscroll=True, disabled=True, size=(int(win_width / 18), int(win_height / 36))),
-        sg.Button("Pause", key="pause_4"),
-        sg.Multiline(key="data_4", autoscroll=True, disabled=True, size=(int(win_width / 18), int(win_height / 36)))]])
+        sg.Column([
+            [sg.Button("Pause", key="pause_3")],
+            [sg.Button("Resume", key="resume_3")]]),
+        sg.Multiline(key="data_3", autoscroll=True, disabled=True, size=(int(win_width / 20), int(win_height / 36))),
+        sg.Column([
+            [sg.Button("Pause", key="pause_4")],
+            [sg.Button("Resume", key="resume_4")]]),
+        sg.Multiline(key="data_4", autoscroll=True, disabled=True, size=(int(win_width / 20), int(win_height / 36)))]])
 ], relief=sg.RELIEF_FLAT, show_handle=False)]]
 
 # create the window
@@ -418,19 +541,30 @@ async def run_gui(miner_list: list):
             sys.exit()
         if event == "pause_1":
             await miner_list[0].pause()
+        if event == "resume_1":
+            await miner_list[0].resume()
+
         if event == "pause_2":
             await miner_list[1].pause()
+        if event == "resume_2":
+            await miner_list[1].resume()
+
         if event == "pause_3":
             await miner_list[2].pause()
+        if event == "resume_3":
+            await miner_list[2].resume()
+
         if event == "pause_4":
             await miner_list[3].pause()
+        if event == "resume_4":
+            await miner_list[3].resume()
 
 
 # declare all miners to be used in the GUI
-miner1 = Miner('172.16.1.99', 1)
-miner2 = Miner('172.16.1.98', 2)
-miner3 = Miner('172.16.1.97', 3)
-miner4 = Miner('172.16.1.96', 4)
+miner1 = Miner('192.168.1.11', 1)
+miner2 = Miner('192.168.1.12', 2)
+miner3 = Miner('192.168.1.13', 3)
+miner4 = Miner('192.168.1.14', 4)
 
 # create a list of the miners
 miners = [miner1, miner2, miner3, miner4]

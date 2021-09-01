@@ -1,0 +1,24 @@
+[[group]]
+name = "group2"
+quota = 1
+
+[[group.pool]]
+url = "stratum+tcp://stratum.slushpool.com:3333"
+user = "UpstreamDataInc.test"
+password = "123"
+
+
+[format]
+version = "1.2+"
+model = "Antminer S9"
+generator = "sysupgrade_script"
+timestamp = 1606842113
+
+[temp_control]
+target_temp = 80.0
+hot_temp = 100.0
+dangerous_temp = 120.0
+
+[autotuning]
+enabled = true
+psu_power_limit = 900
