@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import os
+import base64
 
 import asyncssh
 from screeninfo import get_monitors
@@ -14,7 +15,6 @@ SFTP_SERVER_S9 = os.path.join(os.getcwd(), "files", "system", "sftp-server")
 FW_PRINTENV_S9 = os.path.join(os.getcwd(), "files", "system", "fw_printenv")
 FIRMWARE_PATH_S9 = os.path.join(os.getcwd(), "files", "firmware")
 
-
 class Miner:
     def __init__(self, ip: str, num: int) -> None:
         # set IP of miner
@@ -25,6 +25,8 @@ class Miner:
         self.running = asyncio.Event()
         # set running, otherwise it will block
         self.running.set()
+        # set connection to the miner up, cant be created here
+        self.conn = None
 
     async def pause(self) -> None:
         """
@@ -50,6 +52,18 @@ class Miner:
         """
         # append data to the output of the GUI in the corresponding multiline
         window[f"data_{self.num}"].update(f"[{self.ip}] - {message}\n", append=True)
+
+    async def get_connection(self, username, password):
+        if self.conn is None:
+            # if connection doesnt exist, create it
+            conn = asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
+                                    server_host_key_algs=['ssh-rsa'])
+            # return created connection
+            self.conn = conn
+        else:
+            # if connection exists, return the connection
+            conn = self.conn
+        return conn
 
     async def ping(self, port: int) -> bool:
         """
@@ -149,7 +163,7 @@ class Miner:
                 data_dict = json.loads(data[:-1].decode('utf-8'))
                 # tell the user the version of the miner
                 self.add_to_output(f'Version is {data_dict["VERSION"][0][list(data_dict["VERSION"][0].keys())[0]]}...')
-                return True
+                return data_dict["VERSION"][0][list(data_dict["VERSION"][0].keys())[0]]
             except asyncio.exceptions.TimeoutError:
                 # we have no version, the connection timed out
                 self.add_to_output("Get version failed...")
@@ -158,7 +172,7 @@ class Miner:
                 # connection was refused, tell the user
                 self.add_to_output("Connection refused, retrying...")
 
-    async def run_command(self, cmd: str, username: str, password=None) -> None:
+    async def run_command(self, cmd: str) -> None:
         """
         Run a command on the miner
         """
@@ -167,18 +181,17 @@ class Miner:
             self.add_to_output("Paused...")
         await self.running.wait()
 
-        # create ssh connection to miner
-        async with asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
-                                    server_host_key_algs=['ssh-rsa']) as conn:
-            # send the command and store the result
-            result = await conn.run(cmd)
-            # let the user know the result of the command
-            if result.stdout != "":
-                self.add_to_output(result.stdout)
-            else:
-                self.add_to_output(cmd)
+        # get/create ssh connection to miner
+        conn = await self.get_connection("root", "admin")
+        # send the command and store the result
+        result = await conn.run(cmd)
+        # let the user know the result of the command
+        if result.stdout != "":
+            self.add_to_output(result.stdout)
+        else:
+            self.add_to_output(cmd)
 
-    async def send_dir(self, l_dir: str, r_dest: str, username: str, password=None) -> None:
+    async def send_dir(self, l_dir: str, r_dest: str) -> None:
         """
         Send a directory to a miner
         """
@@ -189,17 +202,16 @@ class Miner:
 
         # tell the user we are sending a file to the miner
         self.add_to_output(f"Sending directory to {self.ip}...")
-        # create ssh connection to miner
-        async with asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
-                                    server_host_key_algs=['ssh-rsa']) as conn:
-            # create sftp client using ssh connection
-            async with conn.start_sftp_client() as sftp:
-                # send a file over sftp
-                await sftp.put(l_dir, remotepath=r_dest, recurse=True)
+        # get/create ssh connection to miner
+        conn = await self.get_connection("root", "admin")
+        # create sftp client using ssh connection
+        async with conn.start_sftp_client() as sftp:
+            # send a file over sftp
+            await sftp.put(l_dir, remotepath=r_dest, recurse=True)
         # tell the user the file was sent to the miner
         self.add_to_output(f"Directory sent...")
 
-    async def send_file(self, l_file: str, r_dest: str, username: str, password=None) -> None:
+    async def send_file(self, l_file: str, r_dest: str) -> None:
         """
         Send a file to a miner
         """
@@ -210,19 +222,13 @@ class Miner:
 
         # tell the user we are sending a file to the miner
         self.add_to_output(f"Sending file to {self.ip}...")
-        # create ssh connection to miner
-        async with asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
-                                    server_host_key_algs=['ssh-rsa']) as conn:
-            await asyncssh.scp(l_file, (conn, r_dest))
-
-            # create sftp client using ssh connection
-        #            async with conn.start_sftp_client() as sftp:
-        # send a file over sftp
-        #                await sftp.put(l_file, remotepath=r_dest)
-        # tell the user the file was sent to the miner
+        # cget/create ssh connection to miner
+        conn = await self.get_connection("root", "admin")
+        # send file over scp
+        await asyncssh.scp(l_file, (conn, r_dest))
         self.add_to_output(f"File sent...")
 
-    async def get_file(self, r_file: str, l_dest: str, username: str, password=None) -> None:
+    async def get_file(self, r_file: str, l_dest: str) -> None:
         """
         Copy a file from a miner
         """
@@ -234,12 +240,11 @@ class Miner:
         # tell the user we are copying a file from the miner
         self.add_to_output(f"Copying file from {self.ip}...")
         # create ssh connection to miner
-        async with asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
-                                    server_host_key_algs=['ssh-rsa']) as conn:
-            # create sftp client using ssh connection
-            async with conn.start_sftp_client() as sftp:
-                # copy a file over sftp
-                await sftp.get(r_file, localpath=l_dest)
+        conn = await self.get_connection("root", "admin")
+        # create sftp client using ssh connection
+        async with conn.start_sftp_client() as sftp:
+            # copy a file over sftp
+            await sftp.get(r_file, localpath=l_dest)
         # tell the user we copied the file from the miner
         self.add_to_output(f"File copied...")
 
@@ -272,7 +277,7 @@ class Miner:
             # ssh is unlocked
             return True
 
-    async def send_referral(self, username: str, password=None) -> None:
+    async def send_referral(self) -> None:
         """
         Send the referral IPK to a miner
         """
@@ -285,17 +290,16 @@ class Miner:
         self.add_to_output(f"Sending referral IPK to {self.ip}...")
         # create ssh connection to miner
         try:
-            async with asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
-                                        server_host_key_algs=['ssh-rsa']) as conn:
-                # create sftp client using ssh connection
-                async with conn.start_sftp_client() as sftp:
-                    # send the referral
-                    await sftp.put(REFFERRAL_FILE_S9, remotepath='/tmp/referral.ipk')
-                # install the referral and collect the result
-                result = await conn.run(f'opkg install /tmp/referral.ipk')
-                self.add_to_output(result.stdout.strip())
-                # tell the user the referral completed
-                self.add_to_output(f"Referral configuration completed...")
+            conn = await self.get_connection("root", "admin")
+            # create sftp client using ssh connection
+            async with conn.start_sftp_client() as sftp:
+                # send the referral
+                await sftp.put(REFFERRAL_FILE_S9, remotepath='/tmp/referral.ipk')
+            # install the referral and collect the result
+            result = await conn.run(f'opkg install /tmp/referral.ipk')
+            self.add_to_output(result.stdout.strip())
+            # tell the user the referral completed
+            self.add_to_output(f"Referral configuration completed...")
         except OSError:
             self.add_to_output(f"Unknown error...")
 
@@ -304,37 +308,57 @@ class Miner:
         Run the braiinsOS installation process on the miner
         """
         # remove temp firmware directory, making sure its empty
-        await self.run_command("rm -fr /tmp/firmware", "root", password="admin")
+        await self.run_command("rm -fr /tmp/firmware")
         # recreate temp firmware directory
-        await self.run_command("mkdir -p /tmp/firmware", "root", password="admin")
+        await self.run_command("mkdir -p /tmp/firmware")
         # ensure lib exists
-        await self.run_command("mkdir -p /lib", "root", password="admin")
+        await self.run_command("mkdir -p /lib")
         # copy ld-musl-armhf.so.1 to lib
-        await self.send_file(LIB_FILE_S9, "/lib/ld-musl-armhf.so.1", "root", password="admin")
+        await self.send_file(LIB_FILE_S9, "/lib/ld-musl-armhf.so.1")
         # add execute permissions to /lib/ld-musl-armhf.so.1
-        await self.run_command("chmod +x /lib/ld-musl-armhf.so.1", "root", password="admin")
+        await self.run_command("chmod +x /lib/ld-musl-armhf.so.1")
 
         # create openssh directory in /usr/lib/openssh
-        await self.run_command("mkdir -p /usr/lib/openssh", "root", password="admin")
+        await self.run_command("mkdir -p /usr/lib/openssh")
         # copy sftp-server to /usr/lib/openssh/sftp-server
-        await self.send_file(SFTP_SERVER_S9, "/usr/lib/openssh/sftp-server", "root", password="admin")
+        await self.send_file(SFTP_SERVER_S9, "/usr/lib/openssh/sftp-server")
         # add execute permissions to /usr/lib/openssh/sftp-server
-        await self.run_command("chmod +x /usr/lib/openssh/sftp-server", "root", password="admin")
+        await self.run_command("chmod +x /usr/lib/openssh/sftp-server")
 
         # ensure /usr/sbin exists
-        await self.run_command("mkdir -p /usr/sbin", "root", password="admin")
+        await self.run_command("mkdir -p /usr/sbin")
         # copy fw_printenv to /usr/sbin/fw_printenv
-        await self.send_file(FW_PRINTENV_S9, "/usr/sbin/fw_printenv", "root", password="admin")
+        await self.send_file(FW_PRINTENV_S9, "/usr/sbin/fw_printenv")
         # add execute permissions to /usr/sbin/fw_printenv
-        await self.run_command("chmod +x /usr/sbin/fw_printenv", "root", password="admin")
+        await self.run_command("chmod +x /usr/sbin/fw_printenv")
 
-        await self.run_command("ln -fs /usr/sbin/fw_printenv /usr/sbin/fw_setenv", "root", password="admin")
+        await self.run_command("ln -fs /usr/sbin/fw_printenv /usr/sbin/fw_setenv")
 
         # copy over firmware files to /tmp/firmware
-        await self.send_dir(FIRMWARE_PATH_S9, "/tmp", "root", password="admin")
+        await self.send_dir(FIRMWARE_PATH_S9, "/tmp")
         # add execute permissions to firmware stage 1
-        await self.run_command("chmod +x /tmp/firmware/stage1.sh", "root", password="admin")
+        await self.run_command("chmod +x /tmp/firmware/stage1.sh")
 
+        #generate random HWID to be used in install
+        HW_ID = base64.b64encode(os.urandom(12), b'ab').decode('ascii')
+        # generate install command
+        install_cmd = f"/tmp/firmware stage1.sh \
+        '{HW_ID}' \
+        'UpstreamDataInc.test' \
+        '900' \
+        'yes' \
+        'cond' \
+        'no' \
+        'no' \
+        'no'"
+
+        # run the install
+        await self.run_command(f"{install_cmd} && /sbin/reboot")
+        # close ssh connection on our own, we know it will fail if not
+        self.conn.exit()
+        self.conn = None
+        # wait 120 seconds for reboot
+        await asyncio.sleep(120)
 
 async def run(miner: Miner) -> None:
     while True:
@@ -342,9 +366,15 @@ async def run(miner: Miner) -> None:
         if await miner.ping_http():
             if await miner.ping_ssh():
                 miner.add_to_output('SSH Connected...')
+                if await miner.get_version() == "BOSMiner":
+                    miner.add_to_output('Braiins is already installed')
+                    break
+                else:
+                    miner.add_to_output('Starting install...')
+                    await miner.install()
             else:
-                miner.add_to_output('SSH Down...')
-            await miner.get_version()
+                miner.add_to_output('SSH Disconnected...')
+                miner.add_to_output('Unlocking...')
         else:
             window[f"data_{miner.num}"].update(f"[{miner.ip}] - Down...\n", append=True)
         # await miner.pause()
