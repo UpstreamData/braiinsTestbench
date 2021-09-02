@@ -1,5 +1,8 @@
 # braiinsTestbench
 
+## Created using Python 3.9
+* create a virtual environment if needed, then pip install -r requirements.txt
+
 ## Setup
 *How to tailor the testbench utility to your use*
 
