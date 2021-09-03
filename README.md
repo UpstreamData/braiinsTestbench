@@ -6,6 +6,11 @@
 ## Setup
 *How to tailor the testbench utility to your use*
 
+### /get_bos_newest.py
+* Gets all of the newest items for /firmware, /system, and the newest /update.tar
+* Requires only standard libraries, should work with only needing python 3+ with 3.9 preferred
+* Run this every once in a while to ensure firmware is new
+
 ### /firmware
 * Taken from BraiinsOS+ ssh install package at https://feeds.braiins-os.com/ by choosing the newest version that contains am1-s9 and getting the ssh gzip file
 * Contains all firmware files for the installation of BraiinsOS+
