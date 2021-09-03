@@ -61,7 +61,10 @@ class Miner:
         # append data to the output of the GUI in the corresponding multiline
         window[f"data_{self.num}"].update(f"[{self.ip}] - {message}\n", append=True)
 
-    async def get_connection(self, username, password):
+    async def get_connection(self, username: str, password: str) -> asyncssh.connect:
+        """
+        Create a new asyncssh connection and save it
+        """
         if self.conn is None:
             # if connection doesnt exist, create it
             conn = await asyncssh.connect(self.ip, known_hosts=None, username=username, password=password,
@@ -119,7 +122,10 @@ class Miner:
             # ping returned false, HTTP is down
             return False
 
-    async def wait_for_disconnect(self):
+    async def wait_for_disconnect(self) -> None:
+        """
+        Wait for the miner to disconnect
+        """
         self.add_to_output('Waiting for disconnect...')
         while await self.ping_http():
             # pause logic
@@ -276,7 +282,7 @@ class Miner:
         # tell the user we copied the file from the miner
         self.add_to_output(f"File copied...")
 
-    async def ssh_unlock(self):
+    async def ssh_unlock(self) -> bool:
         """
         Unlock the SSH of a miner
         """
@@ -329,7 +335,10 @@ class Miner:
         except OSError:
             self.add_to_output(f"Unknown error...")
 
-    async def update(self):
+    async def update(self) -> None:
+        """
+        Run the update process on the miner
+        """
         # pause logic
         if not self.running.is_set():
             self.add_to_output("Paused...")
@@ -453,45 +462,80 @@ class Miner:
 
 
 async def run(miner: Miner) -> None:
+    """
+    Main run loop for the testing process of the miner
+    """
+    # set state to return to
     main_state = "start"
+    # start the main loop
     while True:
         await asyncio.sleep(3)
+        # check state
         if main_state == "start":
+            # Check for http
             if await miner.ping_http():
+                # check for ssh if http works
                 if await miner.ping_ssh():
+                    # if both ssh and http are up, the miner is on and unlocked
                     miner.add_to_output('SSH Connected...')
+                    # check if BraiinsOS is already on the miner
                     if await miner.get_version() == "BOS+":
                         miner.add_to_output('BraiinsOS+ is already installed!')
+                        # set state to update BraiinsOS, skip install
                         main_state = "update"
+                        # restart the while loop just to be safe
                         continue
                     else:
+                        # if BraiinsOS is not installed but ssh is up, move on to installing it over ssh
                         await asyncio.sleep(5)
                         main_state = "install"
                 else:
+                    # miner is on but has no ssh, needs to be unlocked
                     miner.add_to_output('SSH Disconnected...')
                     miner.add_to_output('Unlocking...')
+                    # do the unlock
                     if await miner.ssh_unlock():
+                        # set state to install now that ssh works, ssh_unlock returns True when unlock works
                         main_state = "install"
+                        # restart the while loop just to be safe
                         continue
                     else:
+                        # if ssh unlock fails, it needs to be reset, ssh_unlock will tell the user that and return false, so wait for disconnect
                         await miner.wait_for_disconnect()
+                        # set state to start to retry after reset
                         main_state = "start"
+                        # restart the while loop just to be safe
                         continue
             else:
+                # if no http or ssh are present, the miner is off or not ready
                 window[f"data_{miner.num}"].update(f"[{miner.ip}] - Down...\n", append=True)
+        # check state
         if main_state == "install":
+            # let the user know we are starting install
             miner.add_to_output('Starting install...')
+            # start install
             await miner.install()
+            # after install completes, move to sending referral
             main_state = "referral"
+        # check state
         if main_state == "update":
+            # start update
             await miner.update()
+            # after update completes, move to sending referral
             main_state = "referral"
+        # check state
         if main_state == "referral":
+            # send the referral file, install it, and configure using config.toml
             await miner.send_referral()
+            # set state to done to wait for disconnect
             main_state = "done"
+        # check state
         if main_state == "done":
+            # wait for the user to disconnect the miner
             await miner.wait_for_disconnect()
+            # set state to start and restart the process
             main_state = "start"
+            # restart main loop
             continue
 
 
@@ -528,34 +572,44 @@ layout = [[sg.Pane([
 window = sg.Window('Installer', layout, size=(win_width, win_height), location=(win_width, 0))
 
 
-async def run_gui(miner_list: list):
+async def run_gui(miner_list: list) -> None:
     """
     Run the GUI for the miner installer
     """
     while True:
         # event loop for the GUI
-        # TODO: Add events
         await asyncio.sleep(0)
+        # read events
         event, value = window.read(timeout=1)
+        # end program on closing the window
         if event in (None, 'Cancel'):
             sys.exit()
+
+        # pause logic for miner 1
         if event == "pause_1":
             await miner_list[0].pause()
+        # resume logic for miner 1
         if event == "resume_1":
             await miner_list[0].resume()
 
+        # pause logic for miner 2
         if event == "pause_2":
             await miner_list[1].pause()
+        # resume logic for miner 2
         if event == "resume_2":
             await miner_list[1].resume()
 
+        # pause logic for miner 3
         if event == "pause_3":
             await miner_list[2].pause()
+        # resume logic for miner 3
         if event == "resume_3":
             await miner_list[2].resume()
 
+        # pause logic for miner 4
         if event == "pause_4":
             await miner_list[3].pause()
+        # resume logic for miner 4
         if event == "resume_4":
             await miner_list[3].resume()
 
@@ -569,7 +623,9 @@ miner4 = Miner('192.168.1.14', 4)
 # create a list of the miners
 miners = [miner1, miner2, miner3, miner4]
 
+# create futures list for the miner to be run from
 futures = [run(miner) for miner in miners]
 futures.append(run_gui(miners))
 
+# run the event loop
 asyncio.get_event_loop().run_until_complete(asyncio.gather(*futures))
