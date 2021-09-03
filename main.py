@@ -9,7 +9,7 @@ from screeninfo import get_monitors
 import PySimpleGUI as sg
 
 # define constants such as the BraiinsOS package to be installed, the update tar file, and the referral ipk
-REFFERRAL_FILE_S9 = os.path.join("files", "referral.ipk")
+REFERRAL_FILE_S9 = os.path.join("files", "referral.ipk")
 LIB_FILE_S9 = os.path.join(os.getcwd(), "files", "system", "ld-musl-armhf.so.1")
 SFTP_SERVER_S9 = os.path.join(os.getcwd(), "files", "system", "sftp-server")
 FW_PRINTENV_S9 = os.path.join(os.getcwd(), "files", "system", "fw_printenv")
@@ -318,22 +318,25 @@ class Miner:
         if not self.running.is_set():
             self.add_to_output("Paused...")
         await self.running.wait()
+        # check if the referral file exists
+        if os.path.exists(REFERRAL_FILE_S9):
+            try:
+                # tell the user we are sending the referral
+                self.add_to_output("Sending referral IPK...")
+                # create ssh connection to miner
+                conn = await self.get_connection("root", "admin")
+                # create sftp client using ssh connection
+                await self.send_file(REFERRAL_FILE_S9, '/tmp/referral.ipk')
+                await self.send_file(CONFIG_FILE, '/etc/bosminer.toml')
 
-        # tell the user we are sending the referral
-        self.add_to_output(f"Sending referral IPK...")
-        # create ssh connection to miner
-        try:
-            conn = await self.get_connection("root", "admin")
-            # create sftp client using ssh connection
-            await self.send_file(REFFERRAL_FILE_S9, '/tmp/referral.ipk')
-            await self.send_file(CONFIG_FILE, '/etc/bosminer.toml')
-
-            result = await conn.run(f'opkg install /tmp/referral.ipk && /etc/init.d/bosminer restart')
-            self.add_to_output(result.stdout.strip())
-            # tell the user the referral completed
-            self.add_to_output(f"Referral configuration completed...")
-        except OSError:
-            self.add_to_output(f"Unknown error...")
+                result = await conn.run(f'opkg install /tmp/referral.ipk && /etc/init.d/bosminer restart')
+                self.add_to_output(result.stdout.strip())
+                # tell the user the referral completed
+                self.add_to_output(f"Referral configuration completed...")
+            except OSError:
+                self.add_to_output(f"Unknown error...")
+        else:
+            self.add_to_output("No referral file, skipping referral install")
 
     async def update(self) -> None:
         """
